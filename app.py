@@ -3,56 +3,66 @@ from ultralytics import YOLO
 from io import BytesIO
 from PIL import Image
 import requests
-import os
-import tempfile
 import traceback
 
 app = Flask(__name__)
 
 # === CONFIG ===
 MODEL_PATH = "https://huggingface.co/PrateekGaurav7296/pothole-detection/resolve/main/best.pt"
-model = YOLO(MODEL_PATH)  # ✅ Load model once
+model = YOLO(MODEL_PATH)  # Load model once at startup
 
 # === PREDICT ENDPOINT ===
 @app.route("/predict", methods=["POST"])
 def predict():
     """
+    Production-ready pothole detection endpoint.
+    
     Expects JSON payload:
     {
-        "downloadUrl": "https://s3-bucket-name.s3.ap-south-1.amazonaws.com/image123.jpg",
-        "fileName": "image123.jpg",
-        "userId": "42"   # optional, for backend tracking
+        "downloadUrl": "https://s3-bucket-url/image.jpg",
+        "fileName": "image.jpg",
+        "userId": "42"  (optional)
+    }
+    
+    Returns JSON response:
+    {
+        "status": "success",
+        "fileName": "image.jpg",
+        "prediction": "pothole" | "normal",
+        "confidence": 0.95,
+        "userId": "42"
     }
     """
     try:
+        # Parse request
         data = request.get_json(force=True)
         download_url = data.get("downloadUrl")
         file_name = data.get("fileName", "unknown.jpg")
         user_id = data.get("userId", None)
 
+        # Validate required fields
         if not download_url:
             return jsonify({"error": "Missing required field: downloadUrl"}), 400
 
-        print(f"⬇️ Downloading image: {download_url}")
+        print(f"⬇️ Downloading: {file_name}")
 
-        # === 1️⃣ Download image from S3 presigned URL ===
+        # Download image from S3
         resp = requests.get(download_url, timeout=15)
         if resp.status_code != 200:
             return jsonify({"error": f"Failed to download image (HTTP {resp.status_code})"}), 400
 
-        # Save image temporarily
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-            temp_path = tmp.name
-            image = Image.open(BytesIO(resp.content)).convert("RGB")
-            image.save(temp_path)
+        # Load image directly into memory (no temp file needed)
+        image = Image.open(BytesIO(resp.content)).convert("RGB")
 
-        # === 2️⃣ Run YOLO inference ===
-        print(f"🔍 Running inference on {file_name} ...")
-        results = model(temp_path)
+        # Run YOLO inference (YOLO accepts PIL Images directly)
+        print(f"🔍 Running inference: {file_name}")
+        results = model(image)
         detections = results[0].boxes
 
-        # === 3️⃣ Interpret results ===
-        label, confidence = "normal", 0.0
+        # Parse detection results
+        label = "normal"
+        confidence = 0.0
+        
         if len(detections) > 0:
             labels = [model.names[int(cls)] for cls in detections.cls]
             confs = detections.conf.tolist()
@@ -62,30 +72,20 @@ def predict():
                 label = "pothole"
                 confidence = round(confs[pothole_idx], 3)
 
-        # === 4️⃣ Save annotated image (optional local) ===
-        output_dir = "predictions"
-        os.makedirs(output_dir, exist_ok=True)
-        output_file = os.path.join(output_dir, file_name.replace(".jpg", "_pred.jpg"))
-        results[0].save(filename=output_file)
-
-        # === 5️⃣ Clean up temp file ===
-        os.remove(temp_path)
-
-        # === 6️⃣ Prepare final response ===
+        # Prepare response (format required by Spring Boot backend)
         response_data = {
             "status": "success",
             "fileName": file_name,
             "prediction": label,
             "confidence": confidence,
-            "userId": user_id,
-            "annotated_image_path": f"/{output_file}",  # local path for now
+            "userId": user_id
         }
 
-        print(f"✅ [{file_name}] => {label.upper()} ({confidence})")
+        print(f"✅ [{file_name}] => {label.upper()} (confidence: {confidence})")
         return jsonify(response_data), 200
 
     except Exception as e:
-        print("❌ Exception:", traceback.format_exc())
+        print("❌ Error:", traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
 
