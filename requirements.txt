@@ -1,0 +1,7 @@
+flask
+ultralytics
+torch
+pillow
+requests
+gunicorn
+numpy
